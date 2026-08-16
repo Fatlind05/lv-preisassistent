@@ -1,5 +1,7 @@
 "use client";
 
+import { UserButton } from "@clerk/nextjs";
+import { upload } from "@vercel/blob/client";
 import {
   Archive,
   ArrowRight,
@@ -69,6 +71,10 @@ const ACCEPTED_FILE_TYPES =
 const MAX_REFERENCE_FILES = 500;
 const SPARSE_REFERENCE_MESSAGE =
   "Dieses LV ist etwas leerer als die anderen. Es bleibt im Ordner – bitte einmal prüfen.";
+
+function wait(milliseconds: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
 
 function median(values: number[]): number {
   if (!values.length) return 0;
@@ -146,16 +152,6 @@ function fileKind(file: File | null | undefined): "xlsx" | "pdf" | "image" | nul
 
 function fileKey(file: File): string {
   return `${file.name}-${file.size}-${file.lastModified}`;
-}
-
-function initials(name: string | null): string {
-  if (!name) return "FS";
-  const local = name.includes("@") ? name.split("@")[0] : name;
-  const parts = local.split(/[.\s_-]+/).filter(Boolean);
-  return parts
-    .slice(0, 2)
-    .map((part) => part[0]?.toUpperCase())
-    .join("") || "FS";
 }
 
 export default function LvAssistant({ displayName }: LvAssistantProps) {
@@ -396,19 +392,54 @@ export default function LvAssistant({ displayName }: LvAssistantProps) {
   }
 
   async function storeOriginalFile(file: File, purpose: "reference" | "new_lv") {
-    const formData = new FormData();
-    formData.append("file", file, file.name);
-    formData.append("purpose", purpose);
-    const response = await fetch("/api/files", { method: "POST", body: formData });
-    const payload = (await response.json()) as {
+    const fingerprint = await fingerprintFile(file);
+    const duplicateResponse = await fetch(
+      `/api/files?fingerprint=${encodeURIComponent(fingerprint)}`,
+      { cache: "no-store" },
+    );
+    const duplicatePayload = (await duplicateResponse.json()) as {
       duplicate?: boolean;
       document?: StoredDocument;
       error?: string;
     };
-    if (!response.ok || !payload.document) {
-      throw new Error(payload.error || "Originaldatei konnte nicht archiviert werden.");
+    if (!duplicateResponse.ok) {
+      throw new Error(duplicatePayload.error || "Dateiarchiv konnte nicht geprüft werden.");
     }
-    return { duplicate: Boolean(payload.duplicate), document: payload.document };
+    if (duplicatePayload.duplicate && duplicatePayload.document) {
+      return { duplicate: true, document: duplicatePayload.document };
+    }
+
+    const id = crypto.randomUUID();
+    const extension = file.name.split(".").pop()?.toLowerCase() ?? "bin";
+    await upload(`lv-dokumente/${id}.${extension}`, file, {
+      access: "private",
+      handleUploadUrl: "/api/files/upload",
+      clientPayload: JSON.stringify({
+        id,
+        fileName: file.name,
+        fingerprint,
+        purpose,
+      }),
+      contentType: file.type || "application/octet-stream",
+      multipart: file.size > 5 * 1024 * 1024,
+    });
+
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      const response = await fetch(
+        `/api/files?fingerprint=${encodeURIComponent(fingerprint)}`,
+        { cache: "no-store" },
+      );
+      const payload = (await response.json()) as {
+        duplicate?: boolean;
+        document?: StoredDocument;
+      };
+      if (response.ok && payload.document) {
+        return { duplicate: Boolean(payload.duplicate), document: payload.document };
+      }
+      await wait(500);
+    }
+
+    throw new Error("Upload abgeschlossen, aber noch nicht im Dateiarchiv bestätigt.");
   }
 
   async function updateStoredDocument(
@@ -417,11 +448,15 @@ export default function LvAssistant({ displayName }: LvAssistantProps) {
     propertyManagement: string,
     positionCount: number,
   ) {
-    await fetch("/api/files", {
+    const response = await fetch("/api/files", {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ id, status, propertyManagement, positionCount }),
     });
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string };
+      throw new Error(payload.error || "Dateistatus konnte nicht gespeichert werden.");
+    }
   }
 
   async function toggleDocumentReviewed(document: StoredDocument) {
@@ -642,7 +677,7 @@ export default function LvAssistant({ displayName }: LvAssistantProps) {
         );
       }
 
-      await fetch("/api/jobs", {
+      const jobResponse = await fetch("/api/jobs", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -654,6 +689,10 @@ export default function LvAssistant({ displayName }: LvAssistantProps) {
           openCount: open,
         }),
       });
+      if (!jobResponse.ok) {
+        const payload = (await jobResponse.json()) as { error?: string };
+        throw new Error(payload.error || "Verlauf konnte nicht gespeichert werden.");
+      }
       await loadData();
     } catch (error) {
       setResultMessage(error instanceof Error ? error.message : "Das LV konnte nicht verarbeitet werden.");
@@ -717,7 +756,7 @@ export default function LvAssistant({ displayName }: LvAssistantProps) {
           <a href="#verlauf">Verlauf</a>
         </nav>
         <div className="user-chip" title={displayName ?? "Angemeldeter Benutzer"}>
-          <span className="user-avatar">{initials(displayName)}</span>
+          <UserButton />
           <span className="user-copy">
             <strong>{displayName?.split("@")[0] || "Fatlind"}</strong>
             <small>Teamzugang</small>

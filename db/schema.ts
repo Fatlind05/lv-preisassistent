@@ -1,14 +1,19 @@
-import { sql } from "drizzle-orm";
 import {
   index,
   integer,
-  real,
-  sqliteTable,
+  numeric,
+  pgTable,
   text,
+  timestamp,
   uniqueIndex,
-} from "drizzle-orm/sqlite-core";
+} from "drizzle-orm/pg-core";
 
-export const referenceFiles = sqliteTable(
+const createdAt = () =>
+  timestamp("created_at", { mode: "string", withTimezone: true })
+    .notNull()
+    .defaultNow();
+
+export const referenceFiles = pgTable(
   "reference_files",
   {
     id: text("id").primaryKey(),
@@ -18,12 +23,12 @@ export const referenceFiles = sqliteTable(
     fingerprint: text("fingerprint").notNull(),
     positionCount: integer("position_count").notNull().default(0),
     importedBy: text("imported_by"),
-    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    createdAt: createdAt(),
   },
   (table) => [uniqueIndex("reference_files_fingerprint_uq").on(table.fingerprint)],
 );
 
-export const priceEntries = sqliteTable(
+export const priceEntries = pgTable(
   "price_entries",
   {
     id: text("id").primaryKey(),
@@ -37,10 +42,14 @@ export const priceEntries = sqliteTable(
     normalizedDescription: text("normalized_description").notNull(),
     workCategory: text("work_category").notNull().default("sonstiges"),
     unit: text("unit").notNull().default(""),
-    unitPrice: real("unit_price").notNull(),
+    unitPrice: numeric("unit_price", {
+      mode: "number",
+      precision: 12,
+      scale: 2,
+    }).notNull(),
     sourceSheet: text("source_sheet"),
     sourceRow: integer("source_row"),
-    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    createdAt: createdAt(),
   },
   (table) => [
     index("price_entries_reference_idx").on(table.referenceFileId),
@@ -51,7 +60,7 @@ export const priceEntries = sqliteTable(
   ],
 );
 
-export const processingJobs = sqliteTable(
+export const processingJobs = pgTable(
   "processing_jobs",
   {
     id: text("id").primaryKey(),
@@ -62,12 +71,15 @@ export const processingJobs = sqliteTable(
     matchedCount: integer("matched_count").notNull().default(0),
     openCount: integer("open_count").notNull().default(0),
     processedBy: text("processed_by"),
-    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    createdAt: createdAt(),
   },
-  (table) => [index("processing_jobs_created_idx").on(table.createdAt)],
+  (table) => [
+    uniqueIndex("processing_jobs_fingerprint_uq").on(table.fingerprint),
+    index("processing_jobs_created_idx").on(table.createdAt),
+  ],
 );
 
-export const storedDocuments = sqliteTable(
+export const storedDocuments = pgTable(
   "stored_documents",
   {
     id: text("id").primaryKey(),
@@ -81,10 +93,12 @@ export const storedDocuments = sqliteTable(
     status: text("status").notNull().default("gespeichert"),
     propertyManagement: text("property_management").notNull().default(""),
     positionCount: integer("position_count").notNull().default(0),
-    reviewedAt: text("reviewed_at"),
+    reviewedAt: timestamp("reviewed_at", { mode: "string", withTimezone: true }),
     importedBy: text("imported_by"),
-    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { mode: "string", withTimezone: true })
+      .notNull()
+      .defaultNow(),
   },
   (table) => [
     uniqueIndex("stored_documents_fingerprint_uq").on(table.fingerprint),

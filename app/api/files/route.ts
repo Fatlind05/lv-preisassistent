@@ -1,10 +1,9 @@
 import { desc, eq } from "drizzle-orm";
 import { getDb } from "../../../db";
 import { storedDocuments } from "../../../db/schema";
-import { getDocumentBucket } from "../../lib/document-storage";
+import { safeErrorResponse } from "../../lib/route-errors";
+import { requireActor } from "../../lib/server-auth";
 
-const MAX_FILE_SIZE = 25 * 1024 * 1024;
-const ALLOWED_EXTENSIONS = new Set(["xlsx", "pdf", "jpg", "jpeg", "png", "webp"]);
 const publicDocumentSelection = {
   id: storedDocuments.id,
   fileName: storedDocuments.fileName,
@@ -26,32 +25,24 @@ function cleanText(value: unknown, max: number): string {
   return typeof value === "string" ? value.trim().slice(0, max) : "";
 }
 
-function fileTypeFromName(fileName: string): "xlsx" | "pdf" | "image" | null {
-  const extension = fileName.split(".").pop()?.toLowerCase() ?? "";
-  if (!ALLOWED_EXTENSIONS.has(extension)) return null;
-  if (extension === "xlsx") return "xlsx";
-  if (extension === "pdf") return "pdf";
-  return "image";
-}
-
-async function fileFingerprint(bytes: ArrayBuffer): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return [...new Uint8Array(digest)]
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-}
-
 export async function GET(request: Request) {
   try {
-    const db = await getDb();
-    const fingerprint = cleanText(new URL(request.url).searchParams.get("fingerprint"), 128);
+    await requireActor();
+    const db = getDb();
+    const fingerprint = cleanText(
+      new URL(request.url).searchParams.get("fingerprint"),
+      128,
+    );
     if (fingerprint) {
       const existing = await db
         .select(publicDocumentSelection)
         .from(storedDocuments)
         .where(eq(storedDocuments.fingerprint, fingerprint))
         .limit(1);
-      return Response.json({ duplicate: Boolean(existing[0]), document: existing[0] ?? null });
+      return Response.json({
+        duplicate: Boolean(existing[0]),
+        document: existing[0] ?? null,
+      });
     }
 
     const documents = await db
@@ -61,94 +52,13 @@ export async function GET(request: Request) {
       .limit(500);
     return Response.json({ documents });
   } catch (error) {
-    return Response.json(
-      { error: error instanceof Error ? error.message : "Dateiarchiv konnte nicht geladen werden." },
-      { status: 503 },
-    );
-  }
-}
-
-export async function POST(request: Request) {
-  let storageKey: string | null = null;
-  try {
-    const formData = await request.formData();
-    const value = formData.get("file");
-    if (!(value instanceof File)) {
-      return Response.json({ error: "Keine Datei übergeben." }, { status: 400 });
-    }
-    if (value.size <= 0 || value.size > MAX_FILE_SIZE) {
-      return Response.json({ error: "Die Datei ist leer oder größer als 25 MB." }, { status: 400 });
-    }
-
-    const fileName = cleanText(value.name, 240);
-    const fileType = fileTypeFromName(fileName);
-    if (!fileType) {
-      return Response.json(
-        { error: "Erlaubt sind Excel (.xlsx), PDF und Bilder (JPG, PNG, WEBP)." },
-        { status: 400 },
-      );
-    }
-    const purpose = formData.get("purpose") === "new_lv" ? "new_lv" : "reference";
-    const bytes = await value.arrayBuffer();
-    const fingerprint = await fileFingerprint(bytes);
-    const db = await getDb();
-    const existing = await db
-      .select(publicDocumentSelection)
-      .from(storedDocuments)
-      .where(eq(storedDocuments.fingerprint, fingerprint))
-      .limit(1);
-    if (existing[0]) {
-      return Response.json({ duplicate: true, document: existing[0] });
-    }
-
-    const id = crypto.randomUUID();
-    const extension = fileName.split(".").pop()?.toLowerCase() ?? "bin";
-    storageKey = `lv-dokumente/${id}.${extension}`;
-    const bucket = await getDocumentBucket();
-    await bucket.put(storageKey, bytes, {
-      httpMetadata: {
-        contentType: value.type || "application/octet-stream",
-        contentDisposition: `inline; filename*=UTF-8''${encodeURIComponent(fileName)}`,
-      },
-      customMetadata: { fingerprint, purpose },
-    });
-
-    const document = {
-      id,
-      fileName,
-      fileType,
-      contentType: value.type || "application/octet-stream",
-      fileSize: value.size,
-      fingerprint,
-      storageKey,
-      purpose,
-      status: "gespeichert",
-      propertyManagement: "",
-      positionCount: 0,
-      reviewedAt: null,
-      importedBy:
-        request.headers.get("oai-authenticated-user-email")?.slice(0, 240) ?? null,
-    } as const;
-    await db.insert(storedDocuments).values(document);
-    return Response.json({ duplicate: false, document }, { status: 201 });
-  } catch (error) {
-    if (storageKey) {
-      try {
-        const bucket = await getDocumentBucket();
-        await bucket.delete(storageKey);
-      } catch {
-        // Die ursprüngliche Fehlermeldung bleibt maßgeblich.
-      }
-    }
-    return Response.json(
-      { error: error instanceof Error ? error.message : "Datei konnte nicht gespeichert werden." },
-      { status: 500 },
-    );
+    return safeErrorResponse(error, "Dateiarchiv konnte nicht geladen werden.", 503);
   }
 }
 
 export async function PATCH(request: Request) {
   try {
+    await requireActor();
     const payload = (await request.json()) as {
       id?: string;
       status?: string;
@@ -186,16 +96,17 @@ export async function PATCH(request: Request) {
       return Response.json({ error: "Keine Änderung übergeben." }, { status: 400 });
     }
 
-    const db = await getDb();
-    await db
+    const db = getDb();
+    const updated = await db
       .update(storedDocuments)
       .set(updates)
-      .where(eq(storedDocuments.id, id));
+      .where(eq(storedDocuments.id, id))
+      .returning({ id: storedDocuments.id });
+    if (!updated[0]) {
+      return Response.json({ error: "Datei nicht gefunden." }, { status: 404 });
+    }
     return Response.json({ ok: true, reviewedAt: updates.reviewedAt });
   } catch (error) {
-    return Response.json(
-      { error: error instanceof Error ? error.message : "Dateistatus konnte nicht gespeichert werden." },
-      { status: 500 },
-    );
+    return safeErrorResponse(error, "Dateistatus konnte nicht gespeichert werden.");
   }
 }

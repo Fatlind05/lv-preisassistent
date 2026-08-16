@@ -52,15 +52,19 @@ export function normalizeUnit(value: string): string {
     .toLocaleLowerCase("de-DE")
     .trim()
     .replace(/\s+/g, "")
+    .replace(/\//g, "")
     .replace(/²/g, "2")
     .replace(/\./g, "");
   if (["m2", "qm"].includes(unit)) return "m²";
   if (["mwo", "meterwoche", "meterwochen"].includes(unit)) return "mWo";
   if (["m2wo", "qmwo", "quadratmeterwoche", "quadratmeterwochen"].includes(unit)) return "m²Wo";
   if (["stk", "st", "stueck", "stück"].includes(unit)) return "Stk.";
+  if (["stkw", "stueckwoche", "stueckwochen", "stückwoche", "stückwochen"].includes(unit)) return "StkW";
   if (["lfm", "laufendermeter", "laufendemeter"].includes(unit)) return "lfm";
+  if (["lfmwo", "laufendermeterwoche", "laufendermeterwochen"].includes(unit)) return "lfm/Wo";
+  if (["stgm", "steigmeter"].includes(unit)) return "Stgm";
   if (["std", "h", "stunde", "stunden"].includes(unit)) return "Std.";
-  if (["psch", "pauschal", "pauschale"].includes(unit)) return "psch.";
+  if (["psch", "paus", "pauschal", "pauschale"].includes(unit)) return "psch.";
   if (["d", "tag", "tage"].includes(unit)) return "d";
   if (["wo", "woche", "wochen"].includes(unit)) return "Wo";
   if (["l", "ltr", "liter"].includes(unit)) return "l";

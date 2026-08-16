@@ -302,52 +302,187 @@ type PdfAnnotation = {
   textContent?: string | string[];
 };
 
-function parsePdfLine(line: string, page: number, index: number, asReference: boolean): ParsedPosition | null {
-  const unitPattern = /\b(m(?:²|2)?wo|m²|m2|qm|lfm|stk\.?|st\.?|stueck|stück|std\.?|h|stunden?|tage?|d|wochen?|wo|kg|ltr\.?|liter|l|psch\.?|pauschal|m(?!m))\b/i;
-  const unitMatch = unitPattern.exec(line);
-  if (!unitMatch || unitMatch.index < 2) return null;
+const PDF_POSITION_PREFIX_PATTERN = /^\s*(\d{1,3}(?:(?:\s*[.,]\s*)+\d{1,3}){2,4})(?=\s|$)/;
+const PDF_PRICE_PATTERN = /-?(?:[0-9]{1,3}(?:\.[0-9]{3})*|[0-9]+)[,.][0-9]{2}/g;
+const PDF_UNIT_PATTERN = /(?<![\p{L}\p{N}])(m(?:²|2)?\s*wo|m²|m2|qm|lfm(?:\s*\/\s*wo)?|stueck(?:\s*\/\s*wo)?|stück(?:\s*\/\s*wo)?|stunden?|std\.?|stk(?:\.|w)?|stgm|st\.?|h|tage?|d|wochen?|wo|kg|ltr\.?|liter|l|psch\.?|paus|pauschal|m(?!m))(?![\p{L}\p{N}])/giu;
 
-  const beforeUnit = line.slice(0, unitMatch.index).trim();
-  const afterUnit = line.slice(unitMatch.index + unitMatch[0].length).trim();
-  const structuredPositionMatch = beforeUnit.match(/\b([0-9]{1,3}(?:\.[0-9]{1,3}){1,3})\b/);
-  const leadingPositionMatch = beforeUnit.match(/^([0-9]+(?:[.\s][0-9]+)*)\s+/);
-  const positionMatch = structuredPositionMatch ?? leadingPositionMatch;
-  const positionCode = positionMatch?.[1]?.replace(/\s+/g, ".") ?? "";
-  const withoutPosition = positionMatch
-    ? beforeUnit.slice((positionMatch.index ?? 0) + positionMatch[0].length).trim()
-    : beforeUnit;
-  const quantityMatch = withoutPosition.match(/(-?[0-9.]+(?:,[0-9]+)?)\s*$/);
-  const quantity = quantityMatch ? parseNumber(quantityMatch[1]) : null;
-  const description = (quantityMatch
-    ? withoutPosition.slice(0, quantityMatch.index).trim()
-    : withoutPosition
-  ).replace(/\s+/g, " ");
-  if (description.length < 4 || SUMMARY_PATTERN.test(description)) return null;
+type PdfPositionRecord = {
+  position: ParsedPosition;
+  lineIndex: number;
+  endLineIndex: number;
+};
 
-  const priceStrings =
-    afterUnit.match(/-?(?:[0-9]{1,3}(?:\.[0-9]{3})*|[0-9]+)[,.][0-9]{2}/g) ?? [];
-  const unitPrice = priceStrings.length ? parseNumber(priceStrings[0]) : null;
-  const totalPrice = priceStrings.length > 1 ? parseNumber(priceStrings[1]) : null;
-  if (asReference && (!unitPrice || unitPrice <= 0)) return null;
+function normalizePositionCode(value: string): string {
+  return value.split(/\D+/).filter(Boolean).join(".");
+}
 
-  return {
-    id: `Seite-${page}-${index}`,
-    positionCode,
-    shortDescription: description,
-    longDescription: "",
-    description,
-    normalizedDescription: normalizeDescription(description),
-    propertyManagement: "",
-    workCategory: classifyWorkCategory(description),
-    quantity,
-    unit: normalizeUnit(unitMatch[0]),
-    unitPrice,
-    totalPrice,
-    sheetName: `Seite ${page}`,
-    rowNumber: index + 1,
-    priceColumn: null,
-    totalColumn: null,
-  };
+function pdfReferencePriceIndex(lines: string[]): number {
+  for (const line of lines) {
+    const header = normalizedHeader(line);
+    const lvQuantityIndex = header.indexOf("lv menge");
+    const unitPriceIndex = Math.max(
+      header.indexOf(" e preis"),
+      header.indexOf(" einzelpreis"),
+      header.indexOf(" einheitspreis"),
+      header.indexOf(" ep"),
+    );
+    if (lvQuantityIndex >= 0 && unitPriceIndex > lvQuantityIndex) return 1;
+  }
+  return 0;
+}
+
+function hasReferencePriceHeader(value: string): boolean {
+  const text = ` ${normalizedHeader(value)} `;
+  return (
+    text.includes(" e preis ") ||
+    text.includes(" einzelpreis ") ||
+    text.includes(" einheitspreis ") ||
+    text.includes(" ep ")
+  );
+}
+
+function parsePdfLine(
+  line: string,
+  page: number,
+  index: number,
+  asReference: boolean,
+  priceValueIndex = 0,
+): ParsedPosition | null {
+  const positionMatch = line.match(PDF_POSITION_PREFIX_PATTERN);
+  const positionCode = positionMatch ? normalizePositionCode(positionMatch[1]) : "";
+
+  for (const unitMatch of line.matchAll(PDF_UNIT_PATTERN)) {
+    const unitIndex = unitMatch.index ?? -1;
+    if (unitIndex < 2) continue;
+    const beforeUnit = line.slice(0, unitIndex).trim();
+    const afterUnit = line
+      .slice(unitIndex + unitMatch[0].length)
+      .replace(/^\s*\/\s*/, "")
+      .trim();
+    const withoutPosition = positionMatch && (positionMatch.index ?? 0) <= 1
+      ? beforeUnit.slice((positionMatch.index ?? 0) + positionMatch[0].length).trim()
+      : beforeUnit;
+    const quantityBeforeUnit = withoutPosition.match(
+      /(-?(?:[0-9]{1,3}(?:\.[0-9]{3})*|[0-9]+)(?:,[0-9]+)?)\s*$/,
+    );
+    const quantityAfterUnit = quantityBeforeUnit
+      ? null
+      : afterUnit.match(
+          /^(-?(?:[0-9]{1,3}(?:\.[0-9]{3})*|[0-9]+)(?:,[0-9]+)?)\b/,
+        );
+    if (!quantityBeforeUnit && !quantityAfterUnit) continue;
+
+    const descriptionSource = quantityBeforeUnit
+      ? withoutPosition.slice(0, quantityBeforeUnit.index).trim()
+      : withoutPosition;
+    const description = descriptionSource.replace(/\s+/g, " ");
+    if (description.length < 4 || SUMMARY_PATTERN.test(description)) continue;
+
+    const priceSource = quantityAfterUnit
+      ? afterUnit.slice((quantityAfterUnit.index ?? 0) + quantityAfterUnit[0].length).trim()
+      : afterUnit;
+    const priceStrings = priceSource.match(PDF_PRICE_PATTERN) ?? [];
+    const prefixBeforeFirstPrice = priceStrings[0]
+      ? priceSource.slice(0, priceSource.indexOf(priceStrings[0]))
+      : "";
+    if (
+      asReference &&
+      !/^[\s€$]*$/.test(prefixBeforeFirstPrice.replace(/\bEUR\b/gi, ""))
+    ) {
+      continue;
+    }
+    const effectivePriceIndex = quantityAfterUnit ? 0 : priceValueIndex;
+    const unitPrice = priceStrings[effectivePriceIndex]
+      ? parseNumber(priceStrings[effectivePriceIndex])
+      : null;
+    const totalPrice = priceStrings[effectivePriceIndex + 1]
+      ? parseNumber(priceStrings[effectivePriceIndex + 1])
+      : null;
+    if (asReference && (!unitPrice || unitPrice <= 0)) continue;
+
+    return {
+      id: `Seite-${page}-${index}`,
+      positionCode,
+      shortDescription: description,
+      longDescription: "",
+      description,
+      normalizedDescription: normalizeDescription(description),
+      propertyManagement: "",
+      workCategory: classifyWorkCategory(description),
+      quantity: parseNumber(quantityBeforeUnit?.[1] ?? quantityAfterUnit?.[1] ?? null),
+      unit: normalizeUnit(unitMatch[0]),
+      unitPrice,
+      totalPrice,
+      sheetName: `Seite ${page}`,
+      rowNumber: index + 1,
+      priceColumn: null,
+      totalColumn: null,
+    };
+  }
+
+  return null;
+}
+
+function parsePdfPositionRecords(
+  lines: string[],
+  page: number,
+  asReference: boolean,
+): PdfPositionRecord[] {
+  const records: PdfPositionRecord[] = [];
+  const claimedLineIndexes = new Set<number>();
+  const positionStarts = lines
+    .map((line, index) => (PDF_POSITION_PREFIX_PATTERN.test(line) ? index : -1))
+    .filter((index) => index >= 0);
+  const priceValueIndex = pdfReferencePriceIndex(lines);
+
+  positionStarts.forEach((lineIndex, positionIndex) => {
+    const nextPositionIndex = positionStarts[positionIndex + 1] ?? lines.length;
+    const blockEnd = Math.min(nextPositionIndex, lineIndex + 60);
+    for (let claimedIndex = lineIndex; claimedIndex < nextPositionIndex; claimedIndex += 1) {
+      claimedLineIndexes.add(claimedIndex);
+    }
+    for (let endLineIndex = lineIndex; endLineIndex < blockEnd; endLineIndex += 1) {
+      const candidate = lines.slice(lineIndex, endLineIndex + 1).join(" ");
+      const position = parsePdfLine(
+        candidate,
+        page,
+        lineIndex,
+        asReference,
+        priceValueIndex,
+      );
+      if (!position) continue;
+      records.push({ position, lineIndex, endLineIndex });
+      break;
+    }
+  });
+
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    if (claimedLineIndexes.has(lineIndex)) continue;
+    const maximumWindowSize = asReference ? 1 : 4;
+    for (let windowSize = 1; windowSize <= maximumWindowSize; windowSize += 1) {
+      if (lineIndex + windowSize > lines.length) break;
+      const endLineIndex = lineIndex + windowSize - 1;
+      if ([...Array(windowSize).keys()].some((offset) => claimedLineIndexes.has(lineIndex + offset))) {
+        break;
+      }
+      const position = parsePdfLine(
+        lines.slice(lineIndex, endLineIndex + 1).join(" "),
+        page,
+        lineIndex,
+        asReference,
+        priceValueIndex,
+      );
+      if (!position) continue;
+      records.push({ position, lineIndex, endLineIndex });
+      for (let offset = 0; offset < windowSize; offset += 1) {
+        claimedLineIndexes.add(lineIndex + offset);
+      }
+      lineIndex = endLineIndex;
+      break;
+    }
+  }
+
+  return records.sort((left, right) => left.lineIndex - right.lineIndex);
 }
 
 export function parseRecognizedText(text: string, asReference: boolean): ParsedPosition[] {
@@ -355,33 +490,13 @@ export function parseRecognizedText(text: string, asReference: boolean): ParsedP
     .split(/\r?\n/)
     .map((line) => line.replace(/[|¦]/g, " ").replace(/\s+/g, " ").trim())
     .filter(Boolean);
-  const positions: ParsedPosition[] = [];
 
-  for (let index = 0; index < lines.length; index += 1) {
-    let position: ParsedPosition | null = null;
-    let consumed = 1;
-
-    for (const windowSize of [1, 2, 3]) {
-      if (index + windowSize > lines.length) break;
-      const candidate = lines.slice(index, index + windowSize).join(" ");
-      position = parsePdfLine(candidate, 1, index, asReference);
-      if (position) {
-        consumed = windowSize;
-        break;
-      }
-    }
-
-    if (!position) continue;
-    positions.push({
-      ...position,
-      id: `Foto-${index}`,
-      sheetName: "Foto",
-      rowNumber: index + 1,
-    });
-    index += consumed - 1;
-  }
-
-  return positions;
+  return parsePdfPositionRecords(lines, 1, asReference).map(({ position, lineIndex }) => ({
+    ...position,
+    id: `Foto-${lineIndex}`,
+    sheetName: "Foto",
+    rowNumber: lineIndex + 1,
+  }));
 }
 
 type OcrWord = {
@@ -828,11 +943,18 @@ async function parseImage(
   }
 }
 
-async function parsePdf(file: File, asReference: boolean): Promise<ParsedDocument> {
+async function parsePdf(
+  file: File,
+  asReference: boolean,
+  onProgress?: ParseProgress,
+): Promise<ParsedDocument> {
+  onProgress?.(0.02, "PDF wird geöffnet");
   const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-  const worker = await import("pdfjs-dist/legacy/build/pdf.worker.min.mjs?url");
-  if (typeof worker.default === "string") {
-    pdfjs.GlobalWorkerOptions.workerSrc = worker.default;
+  if (typeof window !== "undefined") {
+    const worker = await import("pdfjs-dist/legacy/build/pdf.worker.min.mjs?url");
+    if (typeof worker.default === "string") {
+      pdfjs.GlobalWorkerOptions.workerSrc = worker.default;
+    }
   }
   const bytes = new Uint8Array(await file.arrayBuffer());
   const pdf = await pdfjs.getDocument({ data: bytes }).promise;
@@ -929,6 +1051,10 @@ async function parsePdf(file: File, asReference: boolean): Promise<ParsedDocumen
   }
 
   for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+    onProgress?.(
+      0.05 + ((pageNumber - 1) / Math.max(1, pdf.numPages)) * 0.7,
+      `PDF-Seite ${pageNumber} von ${pdf.numPages} wird gelesen`,
+    );
     const page = await pdf.getPage(pageNumber);
     const [content, rawAnnotations] = await Promise.all([
       page.getTextContent({ includeMarkedContent: true }),
@@ -965,31 +1091,15 @@ async function parsePdf(file: File, asReference: boolean): Promise<ParsedDocumen
       });
     documentText.push(...lines.map((line) => line.text));
 
-    const pagePositions: Array<{ position: ParsedPosition; lineIndex: number; x: number; y: number }> = [];
-    lines.forEach((line, index) => {
-      const position = parsePdfLine(line.text, pageNumber, index, asReference);
-      if (!position) return;
-      pagePositions.push({ position, lineIndex: index, x: line.x, y: line.y });
-    });
-
-    pagePositions.forEach((record, positionIndex) => {
-      const nextLineIndex = pagePositions[positionIndex + 1]?.lineIndex ?? lines.length;
-      const parts: string[] = [];
-      let previousY = record.y;
-      for (
-        let lineIndex = record.lineIndex + 1;
-        lineIndex < nextLineIndex && parts.length < 40;
-        lineIndex += 1
-      ) {
-        const line = lines[lineIndex];
-        const verticalGap = previousY - line.y;
-        if (verticalGap > 48) break;
-        previousY = line.y;
-        if (line.x < record.x + 8 || !usableLongText(line.text)) continue;
-        parts.push(line.text);
-      }
-      attachLongText(record.position, parts);
-    });
+    const pagePositions = parsePdfPositionRecords(
+      lines.map((line) => line.text),
+      pageNumber,
+      asReference,
+    ).map((record) => ({
+      ...record,
+      x: lines[record.lineIndex]?.x ?? 0,
+      y: lines[record.lineIndex]?.y ?? 0,
+    }));
 
     const annotations = rawAnnotations as PdfAnnotation[];
     for (const annotation of annotations) {
@@ -1023,10 +1133,81 @@ async function parsePdf(file: File, asReference: boolean): Promise<ParsedDocumen
     positions.push(...pagePositions.map(({ position }) => position));
   }
 
+  let usedOcr = false;
+  const machineReadableCharacters = documentText.join("").replace(/\s+/g, "").length;
+  if (
+    !positions.length &&
+    machineReadableCharacters < 50 &&
+    typeof document !== "undefined"
+  ) {
+    usedOcr = true;
+    const { createWorker, PSM } = await import("tesseract.js");
+    let ocrPageNumber = 1;
+    const worker = await createWorker("deu", 1, {
+      workerPath: "/tesseract/worker.min.js",
+      corePath: "/tesseract/core",
+      langPath: "/tesseract/lang",
+      gzip: true,
+      logger: (message) => {
+        const pageBase = (ocrPageNumber - 1) / Math.max(1, pdf.numPages);
+        const pageProgress = Math.max(0, Math.min(1, message.progress));
+        onProgress?.(
+          0.12 + (pageBase + pageProgress / Math.max(1, pdf.numPages)) * 0.86,
+          `Scan-Seite ${ocrPageNumber} von ${pdf.numPages} wird erkannt`,
+        );
+      },
+    });
+
+    try {
+      await worker.setParameters({
+        tessedit_pageseg_mode: PSM.SPARSE_TEXT,
+        preserve_interword_spaces: "1",
+        user_defined_dpi: "300",
+      });
+      for (ocrPageNumber = 1; ocrPageNumber <= pdf.numPages; ocrPageNumber += 1) {
+        const page = await pdf.getPage(ocrPageNumber);
+        const viewport = page.getViewport({ scale: 2.2 });
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.ceil(viewport.width);
+        canvas.height = Math.ceil(viewport.height);
+        const canvasContext = canvas.getContext("2d");
+        if (!canvasContext) continue;
+        await page.render({ canvas, canvasContext, viewport }).promise;
+        const result = await worker.recognize(
+          canvas,
+          { rotateAuto: true },
+          { text: true, tsv: true },
+        );
+        documentText.push(result.data.text);
+        const pageHasReferencePrices =
+          !asReference || hasReferencePriceHeader(result.data.text);
+        const recognized = pageHasReferencePrices
+          ? parseRecognizedTsv(result.data.tsv, asReference)
+          : [];
+        const pagePositions = recognized.length
+          ? recognized
+          : pageHasReferencePrices
+            ? parseRecognizedText(result.data.text, asReference)
+            : [];
+        positions.push(
+          ...pagePositions.map((position, index) => ({
+            ...position,
+            id: `Scan-${ocrPageNumber}-${index}`,
+            sheetName: `Scan-Seite ${ocrPageNumber}`,
+            rowNumber: index + 1,
+          })),
+        );
+      }
+    } finally {
+      await worker.terminate();
+    }
+  }
+
   const propertyManagement = detectPropertyManagement(documentText.join("\n"));
   positions.forEach((position) => {
     position.propertyManagement = propertyManagement;
   });
+  onProgress?.(1, "PDF wurde gelesen");
 
   return {
     fileName: file.name,
@@ -1036,12 +1217,18 @@ async function parsePdf(file: File, asReference: boolean): Promise<ParsedDocumen
     workbook: null,
     warnings: positions.length
       ? [
-          "PDF-Positionen werden erkannt; die Ausgabe erfolgt als neue Excel-Datei.",
+          usedOcr
+            ? "Das gescannte PDF wurde per Texterkennung gelesen; die Ausgabe erfolgt als neue Excel-Datei."
+            : "PDF-Positionen werden erkannt; die Ausgabe erfolgt als neue Excel-Datei.",
           longTextPositionIds.size
             ? `${longTextPositionIds.size} Positionen enthalten ausgelesenen Langtext aus PDF-Text oder eingebetteten PDF-Feldern.`
             : "Kein Langtext in der PDF-Datei gefunden. Wenn er im Ausgangsprogramm nur beim Anklicken erscheint, muss er beim PDF-Export mitgespeichert werden.",
         ]
-      : ["In diesem PDF wurde keine eindeutige LV-Tabelle erkannt."],
+      : [
+          usedOcr && asReference
+            ? "Das gescannte PDF wurde gelesen, enthält aber keine eindeutig beschriftete EP-/E-Preis-Spalte."
+            : "In diesem PDF wurde keine eindeutige LV-Tabelle erkannt.",
+        ],
   };
 }
 
@@ -1055,7 +1242,7 @@ export async function parseLvFile(
   }
   const extension = file.name.split(".").pop()?.toLocaleLowerCase("de-DE");
   if (extension === "xlsx") return parseExcel(file, asReference);
-  if (extension === "pdf") return parsePdf(file, asReference);
+  if (extension === "pdf") return parsePdf(file, asReference, onProgress);
   if (extension && IMAGE_EXTENSIONS.has(extension)) {
     return parseImage(file, asReference, onProgress);
   }

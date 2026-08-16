@@ -448,7 +448,9 @@ export default function LvAssistant({ displayName }: LvAssistantProps) {
         document?: StoredDocument;
       };
       if (response.ok && payload.document) {
-        return { duplicate: Boolean(payload.duplicate), document: payload.document };
+        // This lookup confirms the upload we just completed. The document now
+        // exists by design, so it must not be treated as a pre-existing upload.
+        return { duplicate: false, document: payload.document };
       }
       await wait(500);
     }
@@ -531,14 +533,20 @@ export default function LvAssistant({ displayName }: LvAssistantProps) {
       setImportProgress({ current: index + 1, total: pending.length });
       try {
         const archiveResult = await storeOriginalFile(item.file, "reference");
-        if (archiveResult.duplicate) {
+        storedDocumentId = archiveResult.document.id;
+        if (archiveResult.duplicate && archiveResult.document.positionCount > 0) {
           updateQueueItem(item.key, {
             status: "duplicate",
             message: "Schon im Dateiarchiv – nicht doppelt gespeichert",
           });
           continue;
         }
-        storedDocumentId = archiveResult.document.id;
+        if (archiveResult.duplicate) {
+          updateQueueItem(item.key, {
+            status: "reading",
+            message: "Bereits gespeichert – Preise werden erneut ausgelesen …",
+          });
+        }
         const fingerprint = archiveResult.document.fingerprint;
         const document = await parseLvFile(item.file, true, (progress, label) => {
           updateQueueItem(item.key, {

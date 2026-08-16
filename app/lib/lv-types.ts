@@ -97,6 +97,7 @@ export type StoredDocument = {
   status: "gespeichert" | "eingelesen" | "verarbeitet" | "pruefen" | "fehler";
   propertyManagement: string;
   positionCount: number;
+  reviewedAt: string | null;
   importedBy: string | null;
   createdAt: string;
   updatedAt: string;

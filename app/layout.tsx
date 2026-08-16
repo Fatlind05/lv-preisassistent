@@ -5,9 +5,6 @@ export const metadata: Metadata = {
   title: "LV Preisassistent",
   description:
     "Leistungsverzeichnisse aus eigenen Referenzpreisen automatisch ausfüllen.",
-  other: {
-    "codex-preview": "development",
-  },
   icons: {
     icon: "/favicon.svg",
     shortcut: "/favicon.svg",

@@ -17,7 +17,6 @@
     "db:migrate": "dotenv -e .env.local -- drizzle-kit migrate"
   },
   "dependencies": {
-    "@clerk/nextjs": "^7.7.6",
     "@neondatabase/serverless": "^1.1.0",
     "@tesseract.js-data/deu": "^1.0.0",
     "@vercel/blob": "^2.8.0",

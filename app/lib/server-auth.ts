@@ -1,4 +1,5 @@
-import { auth, currentUser } from "@clerk/nextjs/server";
+import { cookies } from "next/headers";
+import { ACCESS_COOKIE_NAME, verifyAccessToken } from "./access-token";
 
 export type Actor = {
   userId: string;
@@ -8,22 +9,21 @@ export type Actor = {
 
 export class UnauthorizedError extends Error {
   constructor() {
-    super("Nicht angemeldet.");
+    super("Zugangscode erforderlich.");
     this.name = "UnauthorizedError";
   }
 }
 
+export async function hasAccess(): Promise<boolean> {
+  const cookieStore = await cookies();
+  return verifyAccessToken(cookieStore.get(ACCESS_COOKIE_NAME)?.value);
+}
+
 export async function requireActor(): Promise<Actor> {
-  const { userId } = await auth();
-  if (!userId) throw new UnauthorizedError();
-
-  const user = await currentUser();
-  const email = user?.primaryEmailAddress?.emailAddress ?? null;
-  const fullName = [user?.firstName, user?.lastName].filter(Boolean).join(" ");
-
+  if (!(await hasAccess())) throw new UnauthorizedError();
   return {
-    userId,
-    email,
-    displayName: fullName || email || "Angemeldeter Benutzer",
+    userId: "shared-code-access",
+    email: null,
+    displayName: "Fatlind",
   };
 }

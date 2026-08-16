@@ -1,6 +1,8 @@
 import { count, desc, eq } from "drizzle-orm";
 import { getDb } from "../../../db";
 import { priceEntries, referenceFiles } from "../../../db/schema";
+import { isUniqueViolation, safeErrorResponse } from "../../lib/route-errors";
+import { requireActor } from "../../lib/server-auth";
 
 type ImportedPosition = {
   positionCode?: string | null;
@@ -40,17 +42,10 @@ function fallbackNormalize(value: string): string {
     .trim();
 }
 
-function routeMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : "Unbekannter Fehler";
-  if (message.includes("no such table")) {
-    return "Die Preisbibliothek wird gerade vorbereitet. Bitte gleich erneut versuchen.";
-  }
-  return message;
-}
-
 export async function GET() {
   try {
-    const db = await getDb();
+    await requireActor();
+    const db = getDb();
     const [fileCountRows, priceCountRows, recentFiles, rows] = await Promise.all([
       db.select({ value: count() }).from(referenceFiles),
       db.select({ value: count() }).from(priceEntries),
@@ -83,10 +78,7 @@ export async function GET() {
           createdAt: priceEntries.createdAt,
         })
         .from(priceEntries)
-        .innerJoin(
-          referenceFiles,
-          eq(priceEntries.referenceFileId, referenceFiles.id),
-        )
+        .innerJoin(referenceFiles, eq(priceEntries.referenceFileId, referenceFiles.id))
         .orderBy(desc(priceEntries.createdAt))
         .limit(20_000),
     ]);
@@ -101,23 +93,22 @@ export async function GET() {
       entries: rows,
     });
   } catch (error) {
-    return Response.json({ error: routeMessage(error) }, { status: 503 });
+    return safeErrorResponse(error, "Preisarchiv konnte nicht geladen werden.", 503);
   }
 }
 
 export async function POST(request: Request) {
-  const db = await getDb();
-  let referenceId: string | null = null;
-
+  let fingerprint = "";
   try {
+    const actor = await requireActor();
     const payload = (await request.json()) as ImportPayload;
     const fileName = textValue(payload.fileName, 240);
     const fileType = textValue(payload.fileType, 24).toLowerCase();
-    const fingerprint = textValue(payload.fingerprint, 128);
+    fingerprint = textValue(payload.fingerprint, 128);
     const propertyManagement = textValue(payload.propertyManagement, 160);
     const rawPositions = Array.isArray(payload.positions) ? payload.positions : [];
 
-    if (!fileName || !fingerprint) {
+    if (!fileName || !/^[0-9a-f]{64}$/i.test(fingerprint)) {
       return Response.json(
         { error: "Dateiname oder Dateiprüfsumme fehlt." },
         { status: 400 },
@@ -130,18 +121,6 @@ export async function POST(request: Request) {
       );
     }
 
-    const existing = await db
-      .select({ id: referenceFiles.id, positionCount: referenceFiles.positionCount })
-      .from(referenceFiles)
-      .where(eq(referenceFiles.fingerprint, fingerprint))
-      .limit(1);
-    if (existing[0]) {
-      return Response.json({
-        duplicate: true,
-        imported: existing[0].positionCount,
-      });
-    }
-
     const positions = rawPositions
       .map((position) => {
         const description = textValue(position.description, 6_000);
@@ -151,16 +130,15 @@ export async function POST(request: Request) {
           textValue(position.normalizedDescription, 6_000) ||
           fallbackNormalize(description);
         const unitPrice = Number(position.unitPrice);
+        const category = textValue(position.workCategory, 24);
         return {
           positionCode: textValue(position.positionCode, 80) || null,
           shortDescription,
           longDescription,
           description,
           normalizedDescription: normalized,
-          workCategory: ["geruest", "innen", "aussen", "sonstiges"].includes(
-            textValue(position.workCategory, 24),
-          )
-            ? textValue(position.workCategory, 24)
+          workCategory: ["geruest", "innen", "aussen", "sonstiges"].includes(category)
+            ? category
             : "sonstiges",
           unit: textValue(position.unit, 40),
           unitPrice,
@@ -187,28 +165,37 @@ export async function POST(request: Request) {
       );
     }
 
-    referenceId = crypto.randomUUID();
-    const importedBy =
-      request.headers.get("oai-authenticated-user-email")?.slice(0, 240) ?? null;
-
-    await db.insert(referenceFiles).values({
-      id: referenceId,
-      fileName,
-      fileType: fileType || "unbekannt",
-      fingerprint,
-      propertyManagement,
-      positionCount: positions.length,
-      importedBy,
-    });
-
-    for (let index = 0; index < positions.length; index += 10) {
-      const chunk = positions.slice(index, index + 10).map((position) => ({
-        id: crypto.randomUUID(),
-        referenceFileId: referenceId as string,
-        ...position,
-      }));
-      await db.insert(priceEntries).values(chunk);
+    const db = getDb();
+    const existing = await db
+      .select({ id: referenceFiles.id, positionCount: referenceFiles.positionCount })
+      .from(referenceFiles)
+      .where(eq(referenceFiles.fingerprint, fingerprint))
+      .limit(1);
+    if (existing[0]) {
+      return Response.json({ duplicate: true, imported: existing[0].positionCount });
     }
+
+    const referenceId = crypto.randomUUID();
+    await db.transaction(async (transaction) => {
+      await transaction.insert(referenceFiles).values({
+        id: referenceId,
+        fileName,
+        fileType: fileType || "unbekannt",
+        fingerprint,
+        propertyManagement,
+        positionCount: positions.length,
+        importedBy: actor.email || actor.userId,
+      });
+
+      for (let index = 0; index < positions.length; index += 250) {
+        const chunk = positions.slice(index, index + 250).map((position) => ({
+          id: crypto.randomUUID(),
+          referenceFileId: referenceId,
+          ...position,
+        }));
+        await transaction.insert(priceEntries).values(chunk);
+      }
+    });
 
     return Response.json({
       duplicate: false,
@@ -216,16 +203,14 @@ export async function POST(request: Request) {
       referenceId,
     });
   } catch (error) {
-    if (referenceId) {
-      try {
-        await db
-          .delete(priceEntries)
-          .where(eq(priceEntries.referenceFileId, referenceId));
-        await db.delete(referenceFiles).where(eq(referenceFiles.id, referenceId));
-      } catch {
-        // Die ursprüngliche Fehlermeldung bleibt maßgeblich.
-      }
+    if (isUniqueViolation(error) && fingerprint) {
+      const existing = await getDb()
+        .select({ positionCount: referenceFiles.positionCount })
+        .from(referenceFiles)
+        .where(eq(referenceFiles.fingerprint, fingerprint))
+        .limit(1);
+      return Response.json({ duplicate: true, imported: existing[0]?.positionCount ?? 0 });
     }
-    return Response.json({ error: routeMessage(error) }, { status: 500 });
+    return safeErrorResponse(error, "Preisdatei konnte nicht importiert werden.");
   }
 }

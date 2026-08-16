@@ -1,6 +1,8 @@
 import { desc, eq } from "drizzle-orm";
 import { getDb } from "../../../db";
 import { processingJobs } from "../../../db/schema";
+import { isUniqueViolation, safeErrorResponse } from "../../lib/route-errors";
+import { requireActor } from "../../lib/server-auth";
 
 type JobPayload = {
   fileName?: string;
@@ -24,28 +26,30 @@ function cleanCount(value: unknown): number {
 
 export async function GET() {
   try {
-    const db = await getDb();
-    const jobs = await db
+    await requireActor();
+    const jobs = await getDb()
       .select()
       .from(processingJobs)
       .orderBy(desc(processingJobs.createdAt))
       .limit(12);
     return Response.json({ jobs });
-  } catch {
-    return Response.json({ jobs: [] });
+  } catch (error) {
+    return safeErrorResponse(error, "Verlauf konnte nicht geladen werden.", 503);
   }
 }
 
 export async function POST(request: Request) {
+  let fingerprint = "";
   try {
+    const actor = await requireActor();
     const payload = (await request.json()) as JobPayload;
     const fileName = cleanText(payload.fileName, 240);
-    const fingerprint = cleanText(payload.fingerprint, 128);
-    if (!fileName || !fingerprint) {
+    fingerprint = cleanText(payload.fingerprint, 128);
+    if (!fileName || !/^[0-9a-f]{64}$/i.test(fingerprint)) {
       return Response.json({ error: "Ungültiger Auftrag." }, { status: 400 });
     }
 
-    const db = await getDb();
+    const db = getDb();
     const existing = await db
       .select()
       .from(processingJobs)
@@ -62,17 +66,20 @@ export async function POST(request: Request) {
       totalPositions: cleanCount(payload.totalPositions),
       matchedCount: cleanCount(payload.matchedCount),
       openCount: cleanCount(payload.openCount),
-      processedBy:
-        request.headers.get("oai-authenticated-user-email")?.slice(0, 240) ??
-        null,
+      processedBy: actor.email || actor.userId,
     };
 
     await db.insert(processingJobs).values(job);
     return Response.json({ job }, { status: 201 });
   } catch (error) {
-    return Response.json(
-      { error: error instanceof Error ? error.message : "Auftrag konnte nicht gespeichert werden." },
-      { status: 500 },
-    );
+    if (isUniqueViolation(error) && fingerprint) {
+      const existing = await getDb()
+        .select()
+        .from(processingJobs)
+        .where(eq(processingJobs.fingerprint, fingerprint))
+        .limit(1);
+      if (existing[0]) return Response.json({ job: existing[0], duplicate: true });
+    }
+    return safeErrorResponse(error, "Auftrag konnte nicht gespeichert werden.");
   }
 }

@@ -1,1 +1,0 @@
-ALTER TABLE `stored_documents` ADD `reviewed_at` text;

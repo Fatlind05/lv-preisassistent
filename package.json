@@ -9,38 +9,45 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "next build",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run test && npm run lint && npm run build",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern public/tesseract",
-    "db:generate": "drizzle-kit generate"
+    "db:generate": "dotenv -e .env.local -- drizzle-kit generate",
+    "db:migrate": "dotenv -e .env.local -- drizzle-kit migrate"
   },
   "dependencies": {
+    "@clerk/nextjs": "^7.7.6",
+    "@neondatabase/serverless": "^1.1.0",
     "@tesseract.js-data/deu": "^1.0.0",
+    "@vercel/blob": "^2.8.0",
     "drizzle-orm": "0.45.2",
     "exceljs": "^4.4.0",
     "lucide-react": "^0.468.0",
-    "next": "16.2.6",
+    "next": "16.3.1",
     "pdfjs-dist": "^5.4.296",
-    "react": "19.2.6",
-    "react-dom": "19.2.6",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
     "tesseract.js": "^6.0.1"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "1.37.1",
     "@tailwindcss/postcss": "4.2.1",
     "@types/node": "22.19.19",
-    "@types/react": "19.2.14",
-    "@types/react-dom": "19.2.3",
-    "@vitejs/plugin-react": "6.0.2",
-    "@vitejs/plugin-rsc": "0.5.26",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "dotenv-cli": "^11.0.0",
     "drizzle-kit": "0.31.10",
     "eslint": "9.39.4",
-    "eslint-config-next": "16.2.6",
-    "react-server-dom-webpack": "19.2.6",
+    "eslint-config-next": "16.3.1",
     "tailwindcss": "4.2.1",
     "typescript": "5.9.3",
-    "vinext": "0.0.50",
-    "vite": "8.0.13",
-    "wrangler": "4.92.0"
+    "vitest": "^4.1.10"
+  },
+  "overrides": {
+    "@esbuild-kit/core-utils": {
+      "esbuild": "0.25.12"
+    },
+    "uuid": "11.1.1"
   },
   "type": "module",
   "displayName": "LV Preisassistent"

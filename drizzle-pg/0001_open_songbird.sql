@@ -1,0 +1,1 @@
+ALTER TABLE "price_entries" ALTER COLUMN "unit_price" SET DATA TYPE numeric(12, 2);

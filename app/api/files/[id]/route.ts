@@ -39,7 +39,7 @@ export async function GET(
     return new Response(object.stream, { headers });
   } catch (error) {
     if (error instanceof UnauthorizedError) {
-      return new Response("Bitte zuerst anmelden.", { status: 401 });
+      return new Response("Bitte zuerst den Zugangscode eingeben.", { status: 401 });
     }
     const reference = crypto.randomUUID().slice(0, 8);
     console.error(`[${reference}] Datei konnte nicht geöffnet werden.`, error);

@@ -15,7 +15,7 @@ export function safeErrorResponse(
   status = 500,
 ): Response {
   if (error instanceof UnauthorizedError) {
-    return Response.json({ error: "Bitte zuerst anmelden." }, { status: 401 });
+    return Response.json({ error: "Bitte zuerst den Zugangscode eingeben." }, { status: 401 });
   }
 
   const reference = crypto.randomUUID().slice(0, 8);

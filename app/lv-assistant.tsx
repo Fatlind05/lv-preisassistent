@@ -1,7 +1,7 @@
 "use client";
 
-import { UserButton } from "@clerk/nextjs";
 import { upload } from "@vercel/blob/client";
+import { useRouter } from "next/navigation";
 import {
   Archive,
   ArrowRight,
@@ -22,6 +22,7 @@ import {
   Image as ImageIcon,
   Layers3,
   LoaderCircle,
+  LogOut,
   LockKeyhole,
   RefreshCw,
   ScanText,
@@ -155,6 +156,7 @@ function fileKey(file: File): string {
 }
 
 export default function LvAssistant({ displayName }: LvAssistantProps) {
+  const router = useRouter();
   const [stats, setStats] = useState<CatalogStats>(EMPTY_STATS);
   const [catalog, setCatalog] = useState<CatalogEntry[]>([]);
   const [jobs, setJobs] = useState<ProcessingJob[]>([]);
@@ -167,6 +169,7 @@ export default function LvAssistant({ displayName }: LvAssistantProps) {
   const [catalogMessage, setCatalogMessage] = useState("");
   const [reviewUpdatingId, setReviewUpdatingId] = useState<string | null>(null);
   const [reviewError, setReviewError] = useState("");
+  const [locking, setLocking] = useState(false);
 
   const [queue, setQueue] = useState<QueuedFile[]>([]);
   const [importing, setImporting] = useState(false);
@@ -235,6 +238,17 @@ export default function LvAssistant({ displayName }: LvAssistantProps) {
   useEffect(() => () => {
     if (pdfPreviewUrlRef.current) URL.revokeObjectURL(pdfPreviewUrlRef.current);
   }, []);
+
+  async function lockApplication() {
+    if (locking) return;
+    setLocking(true);
+    try {
+      await fetch("/api/access", { method: "DELETE" });
+    } finally {
+      router.replace("/code");
+      router.refresh();
+    }
+  }
 
   const previewIsOpen = pdfPreviewOpen || Boolean(archivePreview);
 
@@ -755,13 +769,20 @@ export default function LvAssistant({ displayName }: LvAssistantProps) {
           <a href="#preisarchiv">Preisarchiv</a>
           <a href="#verlauf">Verlauf</a>
         </nav>
-        <div className="user-chip" title={displayName ?? "Angemeldeter Benutzer"}>
-          <UserButton />
+        <button
+          className="user-chip user-chip-button"
+          type="button"
+          onClick={() => void lockApplication()}
+          title="App wieder sperren"
+          disabled={locking}
+        >
+          <span className="user-avatar" aria-hidden="true"><LockKeyhole size={14} /></span>
           <span className="user-copy">
             <strong>{displayName?.split("@")[0] || "Fatlind"}</strong>
-            <small>Teamzugang</small>
+            <small>Mit Code geöffnet</small>
           </span>
-        </div>
+          <LogOut className="user-logout" size={14} aria-hidden="true" />
+        </button>
       </header>
 
       <section className="hero" id="start">

@@ -176,26 +176,35 @@ export async function POST(request: Request) {
     }
 
     const referenceId = crypto.randomUUID();
-    await db.transaction(async (transaction) => {
-      await transaction.insert(referenceFiles).values({
-        id: referenceId,
-        fileName,
-        fileType: fileType || "unbekannt",
-        fingerprint,
-        propertyManagement,
-        positionCount: positions.length,
-        importedBy: actor.email || actor.userId,
-      });
-
+    await db.insert(referenceFiles).values({
+      id: referenceId,
+      fileName,
+      fileType: fileType || "unbekannt",
+      fingerprint,
+      propertyManagement,
+      positionCount: positions.length,
+      importedBy: actor.email || actor.userId,
+    });
+    try {
       for (let index = 0; index < positions.length; index += 250) {
         const chunk = positions.slice(index, index + 250).map((position) => ({
           id: crypto.randomUUID(),
           referenceFileId: referenceId,
           ...position,
         }));
-        await transaction.insert(priceEntries).values(chunk);
+        await db.insert(priceEntries).values(chunk);
       }
-    });
+    } catch (error) {
+      await db
+        .delete(priceEntries)
+        .where(eq(priceEntries.referenceFileId, referenceId))
+        .catch(() => undefined);
+      await db
+        .delete(referenceFiles)
+        .where(eq(referenceFiles.id, referenceId))
+        .catch(() => undefined);
+      throw error;
+    }
 
     return Response.json({
       duplicate: false,

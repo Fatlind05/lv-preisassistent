@@ -1,8 +1,24 @@
-export async function getDocumentBucket(): Promise<R2Bucket> {
-  const { env } = await import("cloudflare:workers");
-  const bucket = (env as unknown as { BUCKET?: R2Bucket }).BUCKET;
-  if (!bucket) {
-    throw new Error("Das Dateiarchiv ist noch nicht verfügbar.");
-  }
-  return bucket;
+type StoredObject = {
+  body: BodyInit;
+  writeHttpMetadata(headers: Headers): void;
+};
+
+type DocumentBucket = {
+  put(
+    key: string,
+    value: ArrayBuffer,
+    options?: Record<string, unknown>,
+  ): Promise<void>;
+  get(key: string): Promise<StoredObject | null>;
+  delete(key: string): Promise<void>;
+};
+
+/**
+ * Temporary Vercel preview boundary. Private document storage is connected in
+ * the next migration step; the preview must not pretend that uploads persist.
+ */
+export async function getDocumentBucket(): Promise<DocumentBucket> {
+  throw new Error(
+    "Das Dateiarchiv ist in dieser Vorschau noch nicht eingerichtet.",
+  );
 }

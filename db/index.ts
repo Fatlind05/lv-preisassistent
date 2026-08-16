@@ -1,13 +1,14 @@
 import { drizzle } from "drizzle-orm/d1";
-import * as schema from "./schema";
 
-export async function getDb() {
-  const { env } = await import("cloudflare:workers");
-  if (!env.DB) {
-    throw new Error(
-      "Cloudflare D1 binding `DB` is unavailable. Set the `d1` field in .openai/hosting.json to `DB` or let your control plane inject the real binding values before using the database."
-    );
-  }
+type AppDatabase = ReturnType<typeof drizzle>;
 
-  return drizzle(env.DB, { schema });
+/**
+ * Temporary Vercel preview boundary. The original application uses Cloudflare
+ * D1. Failing lazily lets the Next.js UI render while preventing accidental
+ * writes to an unconfigured database.
+ */
+export async function getDb(): Promise<AppDatabase> {
+  throw new Error(
+    "Die Preisbibliothek ist in dieser Vorschau noch nicht eingerichtet.",
+  );
 }
